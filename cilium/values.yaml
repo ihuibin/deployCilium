@@ -62,7 +62,9 @@ bandwidthManager:
   enabled: true
 
 hostFirewall:
-  enabled: true
+  # maybe lead to installment failure on some kernel
+  # https://github.com/cilium/cilium/issues/38967
+  enabled: false
 
 localRedirectPolicy: true
 
