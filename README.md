@@ -135,6 +135,12 @@ cilium/
 
     完成指标和观测面板的开启后，即可以在 grafana 上看到 cilium 相关的面板
 
+    可安装 DCE 定义的告警规则 
+
+    ```bash
+    kubectl apply -f ./cilium/ciliumPrometheusRule.yaml
+    ```
+
 7. (可选) 实现多集群互联
 
      注：当多个 cilium 集群之间的应用需要通过 nodePort 相互访问，会因为 nodePort 端口冲突，导致 client 集群把 service 解析到本地集群上，出现访问错误。因此，请务必使用该功能互联集群，并使用 service 来进行东西向访问，解决该问题

@@ -1,0 +1,341 @@
+# based on cilium v1.17.5
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cilium-monitoring-alerts
+  namespace: kube-system
+  labels:
+    app: cilium
+    prometheus: kube-prometheus
+    role: alert-rules
+    # required by dce insight
+    operator.insight.io/managed-by: insight
+spec:
+  groups:
+  # ========================================
+  # Cilium组件健康状态告警规则 (基础版本)
+  # ========================================
+  - name: cilium.component.health
+    interval: 30s
+    rules:
+    # P0级别 - 立即响应
+    - alert: CiliumAgentDown
+      expr: up{job="cilium-agent"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: cilium-agent
+        priority: P0
+      annotations:
+        summary: "Cilium agent is down on {{ $labels.instance }}"
+        description: "Cilium agent has been down for more than 1 minute on node {{ $labels.instance }}. This will cause network connectivity issues."
+        runbook_url: "https://docs.cilium.io/en/stable/operations/troubleshooting/"
+
+    - alert: CiliumOperatorDown
+      expr: up{job="cilium-operator"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: cilium-operator
+        priority: P0
+      annotations:
+        summary: "Cilium operator is down"
+        description: "Cilium operator has been down for more than 1 minute. This will affect cluster-wide network policy and service management."
+
+    # P1级别 - 快速响应
+    - alert: CiliumControllersFailing
+      expr: cilium_controllers_failing > 0
+      for: 5m
+      labels:
+        severity: warning
+        component: cilium-agent
+        priority: P1
+      annotations:
+        summary: "{{ $value }} Cilium controllers are failing on {{ $labels.instance }}"
+        description: "{{ $value }} Cilium controllers have been failing for more than 5 minutes on {{ $labels.instance }}. This may impact network functionality."
+
+    - alert: CiliumHighCPUUsage
+      expr: rate(cilium_process_cpu_seconds_total[5m]) > 0.8
+      for: 10m
+      labels:
+        severity: warning
+        component: cilium-agent
+        priority: P1
+      annotations:
+        summary: "Cilium agent high CPU usage on {{ $labels.instance }}"
+        description: "Cilium agent CPU usage is {{ $value }} (>80%) on {{ $labels.instance }} for more than 10 minutes."
+
+    - alert: CiliumHighMemoryUsage
+      expr: cilium_process_resident_memory_bytes > 2147483648
+      for: 10m
+      labels:
+        severity: warning
+        component: cilium-agent
+        priority: P1
+      annotations:
+        summary: "Cilium agent high memory usage on {{ $labels.instance }}"
+        description: "Cilium agent memory usage is {{ $value }} bytes (>2GB) on {{ $labels.instance }} for more than 10 minutes."
+
+  # ========================================
+  # Endpoint和策略管理告警规则
+  # ========================================
+  - name: cilium.endpoint.policy
+    interval: 30s
+    rules:
+    - alert: CiliumEndpointRegenerationHigh
+      expr: rate(cilium_endpoint_regenerations_total[5m]) > 10
+      for: 5m
+      labels:
+        severity: warning
+        component: cilium-agent
+        priority: P1
+      annotations:
+        summary: "High endpoint regeneration rate on {{ $labels.instance }}"
+        description: "Endpoint regeneration rate is {{ $value }} per second on {{ $labels.instance }}, which may indicate configuration instability."
+
+    - alert: CiliumEndpointRegenerationSlow
+      expr: histogram_quantile(0.95, rate(cilium_endpoint_regeneration_time_stats_seconds_bucket[5m])) > 30
+      for: 5m
+      labels:
+        severity: warning
+        component: cilium-agent
+        priority: P1
+      annotations:
+        summary: "Slow endpoint regeneration on {{ $labels.instance }}"
+        description: "95th percentile endpoint regeneration time is {{ $value }} seconds on {{ $labels.instance }}, which is slower than expected."
+
+    - alert: CiliumPolicyChangeFailed
+      expr: increase(cilium_policy_change_total{outcome="failure"}[5m]) > 0
+      for: 1m
+      labels:
+        severity: warning
+        component: cilium-agent
+        priority: P1
+      annotations:
+        summary: "Cilium policy change failed on {{ $labels.instance }}"
+        description: "{{ $value }} policy changes have failed in the last 5 minutes on {{ $labels.instance }}."
+
+  # ========================================
+  # 业务通信异常告警规则
+  # ========================================
+  - name: cilium.network.communication
+    interval: 30s
+    rules:
+    # P0级别 - 立即响应
+    - alert: CiliumHighPacketDropRate
+      expr: rate(hubble_drop_total[5m]) > 1000
+      for: 2m
+      labels:
+        severity: critical
+        component: network
+        priority: P0
+      annotations:
+        summary: "High packet drop rate detected"
+        description: "Packet drop rate is {{ $value }} per second, which indicates serious network issues."
+
+    - alert: CiliumPolicyDeniedTrafficHigh
+      expr: rate(hubble_drop_total{reason="Policy denied"}[5m]) > 100
+      for: 1m
+      labels:
+        severity: warning
+        component: network-policy
+        priority: P1
+      annotations:
+        summary: "High policy denied traffic"
+        description: "Policy denied traffic rate is {{ $value }} per second, which may indicate misconfigured network policies."
+
+    # P1级别 - 快速响应
+    - alert: CiliumConntrackTableFull
+      expr: cilium_datapath_conntrack_gc_entries > 1000000
+      for: 5m
+      labels:
+        severity: warning
+        component: datapath
+        priority: P1
+      annotations:
+        summary: "Connection tracking table is getting full on {{ $labels.instance }}"
+        description: "Connection tracking table has {{ $value }} entries on {{ $labels.instance }}, approaching capacity limits."
+
+    - alert: CiliumNATTableFull
+      expr: cilium_nat_gc_entries > 500000
+      for: 5m
+      labels:
+        severity: warning
+        component: datapath
+        priority: P1
+      annotations:
+        summary: "NAT table is getting full on {{ $labels.instance }}"
+        description: "NAT table has {{ $value }} entries on {{ $labels.instance }}, approaching capacity limits."
+
+    - alert: CiliumServiceUnavailable
+      expr: cilium_operator_lbipam_services_unsatisfied > 0
+      for: 2m
+      labels:
+        severity: warning
+        component: load-balancer
+        priority: P1
+      annotations:
+        summary: "{{ $value }} services are unsatisfied"
+        description: "{{ $value }} LoadBalancer services did not receive all requested IPs."
+
+  # ========================================
+  # eBPF和数据路径告警规则
+  # ========================================
+  - name: cilium.datapath.ebpf
+    interval: 30s
+    rules:
+    - alert: CiliumBPFMapPressureHigh
+      expr: cilium_bpf_map_pressure > 0.8
+      for: 5m
+      labels:
+        severity: warning
+        component: datapath
+        priority: P1
+      annotations:
+        summary: "High BPF map pressure on {{ $labels.instance }}"
+        description: "BPF map pressure is {{ $value }} (>80%) on {{ $labels.instance }}, which may cause map operation failures."
+
+    - alert: CiliumConntrackGCFailures
+      expr: rate(cilium_datapath_conntrack_gc_key_fallbacks_total[5m]) > 100
+      for: 5m
+      labels:
+        severity: warning
+        component: datapath
+        priority: P1
+      annotations:
+        summary: "High connection tracking GC fallback rate on {{ $labels.instance }}"
+        description: "Connection tracking GC fallback rate is {{ $value }} per second on {{ $labels.instance }}."
+
+  # ========================================
+  # Hubble观测性告警规则
+  # ========================================
+  - name: cilium.hubble.observability
+    interval: 30s
+    rules:
+    - alert: HubbleEventsLost
+      expr: rate(hubble_lost_events_total[5m]) > 100
+      for: 2m
+      labels:
+        severity: warning
+        component: hubble
+        priority: P1
+      annotations:
+        summary: "Hubble is losing events on {{ $labels.instance }}"
+        description: "Hubble event loss rate is {{ $value }} per second on {{ $labels.instance }}. Consider increasing queue size or provisioning more CPU."
+
+    - alert: HubbleRingBufferFull
+      expr: hubble_ring_buffer_utilization > 0.9
+      for: 5m
+      labels:
+        severity: warning
+        component: hubble
+        priority: P1
+      annotations:
+        summary: "Hubble ring buffer utilization high on {{ $labels.instance }}"
+        description: "Hubble ring buffer utilization is {{ $value }} (>90%) on {{ $labels.instance }}."
+
+  # ========================================
+  # 性能和容量告警规则
+  # ========================================
+  - name: cilium.performance.capacity
+    interval: 60s
+    rules:
+    - alert: CiliumSlowUpstreamResponse
+      expr: histogram_quantile(0.95, rate(cilium_proxy_upstream_reply_seconds_bucket[5m])) > 5
+      for: 5m
+      labels:
+        severity: warning
+        component: proxy
+        priority: P2
+      annotations:
+        summary: "Slow upstream response time"
+        description: "95th percentile upstream response time is {{ $value }} seconds, which is slower than expected."
+
+    - alert: CiliumLoadBalancerIPShortage
+      expr: cilium_operator_lbipam_ips_available < 10
+      for: 5m
+      labels:
+        severity: warning
+        component: load-balancer
+        priority: P1
+      annotations:
+        summary: "LoadBalancer IP pool running low"
+        description: "Only {{ $value }} IP addresses available in LoadBalancer IP pool. Consider expanding the pool."
+
+    - alert: CiliumDNSPolicyDeniedHigh
+      expr: rate(cilium_policy_l7_total{rule="dns",verdict="denied"}[5m]) > 100
+      for: 2m
+      labels:
+        severity: warning
+        component: dns-policy
+        priority: P1
+      annotations:
+        summary: "High DNS policy denied rate"
+        description: "DNS policy denied rate is {{ $value }} per second, which may indicate DNS policy misconfigurations."
+
+  # ========================================
+  # 节点和网络连通性告警规则
+  # ========================================
+  - name: cilium.node.connectivity
+    interval: 30s
+    rules:
+    - alert: CiliumNodeUnreachable
+      expr: cilium_unreachable_nodes > 0
+      for: 2m
+      labels:
+        severity: critical
+        component: node-connectivity
+        priority: P0
+      annotations:
+        summary: "{{ $value }} Cilium nodes are unreachable"
+        description: "{{ $value }} nodes are unreachable from {{ $labels.instance }}, indicating network connectivity issues."
+
+    - alert: CiliumHealthEndpointUnreachable
+      expr: cilium_unreachable_health_endpoints > 0
+      for: 2m
+      labels:
+        severity: warning
+        component: health-check
+        priority: P1
+      annotations:
+        summary: "{{ $value }} health endpoints are unreachable"
+        description: "{{ $value }} health endpoints are unreachable from {{ $labels.instance }}."
+
+  # ========================================
+  # 资源配额和限制告警规则
+  # ========================================
+  - name: cilium.resource.limits
+    interval: 60s
+    rules:
+    - alert: CiliumIdentityAllocationNearLimit
+      expr: cilium_identity > 60000
+      for: 5m
+      labels:
+        severity: warning
+        component: identity-allocation
+        priority: P1
+      annotations:
+        summary: "Identity allocation approaching limit"
+        description: "Current identity allocation is {{ $value }}, approaching the maximum limit of 65535."
+
+    - alert: CiliumEndpointCountHigh
+      expr: cilium_endpoint_count > 5000
+      for: 10m
+      labels:
+        severity: warning
+        component: endpoint-management
+        priority: P2
+      annotations:
+        summary: "High endpoint count on {{ $labels.instance }}"
+        description: "Endpoint count is {{ $value }} on {{ $labels.instance }}, which may impact performance."
+
+    - alert: CiliumPolicyCountHigh
+      expr: cilium_policy > 1000
+      for: 10m
+      labels:
+        severity: warning
+        component: policy-management
+        priority: P2
+      annotations:
+        summary: "High policy count on {{ $labels.instance }}"
+        description: "Policy count is {{ $value }} on {{ $labels.instance }}, which may impact performance."
