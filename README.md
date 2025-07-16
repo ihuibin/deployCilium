@@ -201,3 +201,25 @@ chmod +x ./restartAllPods.sh
 - 在使用中，不要同时使用  cilium 和 istio 的 L7 HTTP policy
 
 - 在 istio 使用 sidecar mode with automatic sidecar injection 功能时，如果和 cilium 的 隧道模式（VXLAN or GENEVE）一起工作，需要让 istiod pods 运行在 hostNetwork=true 模式，以便能够被 API server 访问
+
+## 运维排障
+
+- 运行命令 `./cilium/showStatus.sh` 查看集群中 cilium 的状态
+
+- 运行命令 `cilium sysdump` 它会导出一个压缩包，包括集群中所有 cilium 的状态信息
+
+- 抓包
+    # 监控节点本地的实时流量，它最完整，最底层，但是没法看到流量记录
+    kubectl -n kube-system exec ds/cilium -- cilium-dbg monitor -vv
+
+    # 查看实时流量和历史记录，它是通过 hubble 过滤了一道
+    kubectl -n kube-system exec ds/cilium -- hubble observe -f
+
+    # 主机上使用 hubble， 查看整个集群的流量事件
+    cilium hubble port-forward &
+    # 看所有流量
+    hubble observe -f 
+    # 看被拒绝的流量
+    hubble observe --verdict DROPPED --verdict ERROR  -f
+    # 看某个 pod 的流量
+    hubble observe --since 3m --pod default/tiefighter -f
