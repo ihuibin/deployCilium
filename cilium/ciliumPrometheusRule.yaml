@@ -319,7 +319,7 @@ spec:
         description: "Current identity allocation is {{ $value }}, approaching the maximum limit of 65535."
 
     - alert: CiliumEndpointCountHigh
-      expr: cilium_endpoint_count > 5000
+      expr: cilium_endpoint > 5000
       for: 10m
       labels:
         severity: warning
