@@ -135,10 +135,14 @@ cilium/
 
     完成指标和观测面板的开启后，即可以在 grafana 上看到 cilium 相关的面板
 
-    可安装 DCE 定义的告警规则 
+    可安装 DCE 定义的告警规则和精选指标面板
 
     ```bash
-    kubectl apply -f ./cilium/ciliumPrometheusRule.yaml
+    kubectl apply -n <Insight 租户> -f ./cilium/yamls/ciliumPrometheusRules.yaml
+    ```
+
+    ```bash
+    kubectl apply -n <Insight 租户> -f ./cilium/yamls/ciliumGrafana.yaml
     ```
 
 7. (可选) 实现多集群互联
