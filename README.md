@@ -214,6 +214,7 @@ chmod +x ./restartAllPods.sh
 
 - 在 istio 使用 sidecar mode with automatic sidecar injection 功能时，如果和 cilium 的 隧道模式（VXLAN or GENEVE）一起工作，需要让 istiod pods 运行在 hostNetwork=true 模式，以便能够被 API server 访问
 
+
 ## 运维排障
 
 - 运行命令 `./cilium/showStatus.sh` 查看集群中 cilium 的状态
@@ -234,3 +235,4 @@ chmod +x ./restartAllPods.sh
     
     看某个 pod 的流量 ` hubble observe --since 3m --pod default/tiefighter -f`
    
+
