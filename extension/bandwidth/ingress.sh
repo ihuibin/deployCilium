@@ -3,14 +3,13 @@
 :<<EOF
  脚本调用命令：
  ingress.sh  \
- 	--ingress-ip "172.16.13.90"  \
- 	--ingress-interface "macvlan0" \
- 	--egress-interface "veth-ns" \
- 	--via-ip "172.16.13.11" \
- 	--via-mac "08:00:27:bb:01:14" \
- 	--total-bandwidth "300Mbit" \
- 	--tc-rule "80:10Mbit"  \
- 	--tc-rule "443,900:20Mbit"
+         --ingress-ip "172.16.13.90"  \
+         --ingress-interface "macvlan0" \
+         --egress-interface "veth-ns" \
+         --via-ip "172.16.13.11" \
+         --total-bandwidth "300Mbit"  \
+         --tc-rule "ns-01:80:10Mbit"  \
+         --tc-rule "ns-02:443,900:20Mbit"
 
  ./ingress.sh show  
 
@@ -20,15 +19,15 @@
  3. 设置路由转发  ip r add <ingress-ip> via <via-ip> dev <egress-interface> onlink  和邻居表 ip n add <via-ip> lladdr <via-mac> dev <egress-interface> nud permanent
  4. 在 egress-interface 上配置 TC 规则，对 ingress-ip 的不同 端口 的流量 进行限流：
      - 一级父类：设置总网卡带宽 <total-bandwidth>
-     - 二级子类A：缺省类，其他流量共享父类总带宽
-     - 二级子类B+：基于 tc-rule 参数创建，格式 "port[,port]...:bandwidth"
+     - 二级子类A：缺省类，其他流量限制为10Kbit/s
+     - 二级子类B+：基于 tc-rule 参数创建，格式 "name:port[,port]...:bandwidth"
 
 
 qdisc htb 1: root (总带宽)
 ├── class 1:1 (一级父类) 
-    ├── class 1:10 (缺省，其他端口共享)
-    ├── class 1:11 (端口组1限流)
-    ├── class 1:12 (端口组2限流)
+    ├── class 1:10 (缺省，限制为10Kbit/s)
+    ├── class 1:11 (端口组1限流 - ns-01)
+    ├── class 1:12 (端口组2限流 - ns-02)
     └── ......
 EOF
 
@@ -42,11 +41,11 @@ EGRESS_INTERFACE=""        # Egress network interface for TC rules
 VIA_IP=""                  # Next hop IP address
 VIA_MAC=""                 # Next hop MAC address
 TOTAL_BANDWIDTH=""         # Total bandwidth limit
-TC_RULES=()                # Array of TC rules in format "port[,port]...:bandwidth"
+TC_RULES=()                # Array of TC rules in format "name:port[,port]...:bandwidth"
 TARGET_IP=""               # Extracted target IP without CIDR mask
 SHOW_MODE=false            # Flag for show mode operation
 DETECTED_INGRESS_IP=""     # Auto-detected ingress IP for show mode
-DETECTED_VIA_IP=""         # Auto-detected via IP for show mode
+DETECTED_VIA_IP=""        # Auto-detected via IP for show mode
 DETECTED_INGRESS_INTERFACE="" # Auto-detected ingress interface for show mode
 DETECTED_VIA_MAC=""        # Auto-detected via MAC for show mode
 
@@ -64,12 +63,12 @@ show_help() {
     echo "  --via-ip IP                Next hop IP address (required)"
     echo "  --via-mac MAC              Next hop MAC address (required)"
     echo "  --total-bandwidth BW       Total bandwidth limit (required)"
-    echo "  --tc-rule RULE             TC rule in format: 'port[,port]...:bandwidth' (repeatable)"
+    echo "  --tc-rule RULE             TC rule in format: 'name:port[,port]...:bandwidth' (repeatable)"
     echo "  --help                     Show this help information"
     echo ""
     echo "Examples:"
     echo "  Configure ingress forwarding and traffic shaping:"
-    echo "  $0 --ingress-ip '192.168.0.10/24' --ingress-interface 'macvlan0' --egress-interface 'veth0' --via-ip '192.168.0.20' --via-mac '08:00:27:bb:01:14' --total-bandwidth '300Mbit' --tc-rule '80:10Mbit' --tc-rule '443,900:20Mbit'"
+    echo "  $0 --ingress-ip '192.168.0.10/24' --ingress-interface 'macvlan0' --egress-interface 'veth0' --via-ip '192.168.0.20' --via-mac '08:00:27:bb:01:14' --total-bandwidth '300Mbit' --tc-rule 'web:80:10Mbit' --tc-rule 'secure:443,900:20Mbit'"
     echo ""
     echo "  Display current configuration:"
     echo "  $0 show --egress-interface eth0           # View configuration for specified interface"
@@ -439,9 +438,9 @@ create_basic_tc_structure() {
      tc qdisc add dev "$EGRESS_INTERFACE" root handle 1: htb default 10 r2q 100
      tc class add dev "$EGRESS_INTERFACE" parent 1: classid 1:1 htb rate "$TOTAL_BANDWIDTH" ceil "$TOTAL_BANDWIDTH"
 
-    echo "2. 创建缺省二级子类..."
-    # 缺省类：其他端口共享父类总带宽
-     tc class add dev "$EGRESS_INTERFACE" parent 1:1 classid 1:10 htb rate 1mbit ceil "$TOTAL_BANDWIDTH"
+    echo "2. 创建缺省二级子类（限速10Kbit）..."
+    # 缺省类：其他端口限速为 10Kbit
+     tc class add dev "$EGRESS_INTERFACE" parent 1:1 classid 1:10 htb rate 10kbit ceil 10kbit
 }
 
 # --- 解析并创建TC规则函数 ---
@@ -449,11 +448,44 @@ create_tc_rules_from_config() {
     echo "3. 根据TC规则创建端口限流二级子类..."
     local classid_counter=11
     
+    # 创建一个关联数组来存储端口到规则的映射，用于处理重复端口
+    declare -A port_rules_map
+    
+    # 首先解析所有规则，处理重复端口（保留最新的）
     for rule in "${TC_RULES[@]}"; do
-        # 解析规则格式: "port[,port]...:bandwidth"
-        if [[ "$rule" =~ ^([0-9,]+):(.+)$ ]]; then
-            local ports="${BASH_REMATCH[1]}"
+        # 解析规则格式: "name:port[,port]...:bandwidth"
+        if [[ "$rule" =~ ^([^:]+):([0-9,]+):(.+)$ ]]; then
+            local name="${BASH_REMATCH[1]}"
+            local ports="${BASH_REMATCH[2]}"
+            local bandwidth="${BASH_REMATCH[3]}"
+            
+            # 分割端口并存储规则
+            IFS=',' read -ra PORT_ARRAY <<< "$ports"
+            for port in "${PORT_ARRAY[@]}"; do
+                # 存储最新的规则（后面的覆盖前面的）
+                port_rules_map["$port"]="$name:$bandwidth"
+                echo "[DEBUG] Port $port mapped to rule: $name:$bandwidth" >&2
+            done
+        else
+            echo "  警告: TC规则格式错误: $rule (应为 'name:port[,port]...:bandwidth')"
+        fi
+    done
+    
+    # 按规则名称分组端口
+    declare -A rule_groups
+    for port in "${!port_rules_map[@]}"; do
+        local rule_info="${port_rules_map[$port]}"
+        rule_groups["$rule_info"]+="$port,"
+    done
+    
+    # 为每个规则组创建TC类和过滤器
+    for rule_info in "${!rule_groups[@]}"; do
+        if [[ "$rule_info" =~ ^([^:]+):(.+)$ ]]; then
+            local name="${BASH_REMATCH[1]}"
             local bandwidth="${BASH_REMATCH[2]}"
+            local ports="${rule_groups[$rule_info]}"
+            # 移除末尾的逗号
+            ports="${ports%,}"
             
             # Calculate appropriate burst size (at least 10KB or 1/10 of rate)
             local burst_size
@@ -475,8 +507,8 @@ create_tc_rules_from_config() {
                     ;;
             esac
             
-            echo "  创建二级子类 1:$classid_counter，端口: $ports，带宽: $bandwidth，突发: $burst_size"
-            echo "[DEBUG] Creating class 1:$classid_counter with rate=$bandwidth, burst=$burst_size" >&2
+            echo "  创建二级子类 1:$classid_counter，名称: $name，端口: $ports，带宽: $bandwidth，突发: $burst_size"
+            echo "[DEBUG] Creating class 1:$classid_counter with name=$name, rate=$bandwidth, burst=$burst_size" >&2
             
             # Create class with calculated burst size
              tc class add dev "$EGRESS_INTERFACE" parent 1:1 classid 1:$classid_counter htb \
@@ -486,8 +518,6 @@ create_tc_rules_from_config() {
             create_port_filters "$ports" "$classid_counter"
             
             ((classid_counter++))
-        else
-            echo "  警告: TC规则格式错误: $rule (应为 'port[,port]...:bandwidth')"
         fi
     done
 }
@@ -696,7 +726,7 @@ generate_equivalent_command() {
     
     # 获取总带宽
     local total_bandwidth
-            total_bandwidth=$(tc class show dev "$EGRESS_INTERFACE" | grep "^class htb 1:1 root" | head -1 | grep -o "rate [^ ]*" | cut -d' ' -f2)
+    total_bandwidth=$(tc class show dev "$EGRESS_INTERFACE" | grep "^class htb 1:1 root" | head -1 | grep -o "rate [^ ]*" | cut -d' ' -f2)
     
     if [[ -z "$total_bandwidth" ]]; then
         echo "无法解析总带宽配置"
@@ -721,9 +751,9 @@ generate_equivalent_command() {
     echo ""
     echo "解析端口限流规则..."
     
-            # 获取所有非缺省的class (排除根类1:1和默认类1:10)
-        local classes
-        classes=$(tc class show dev "$EGRESS_INTERFACE" | grep "^class htb 1:" | grep -v "1:1 root" | grep -v "1:10 parent")
+    # 获取所有非缺省的class (排除根类1:1和默认类1:10)
+    local classes
+    classes=$(tc class show dev "$EGRESS_INTERFACE" | grep "^class htb 1:" | grep -v "1:1 root" | grep -v "1:10 parent")
     
     if [[ -z "$classes" ]]; then
         echo "未发现端口限流规则"
@@ -736,14 +766,17 @@ generate_equivalent_command() {
     # 按class ID分组处理端口规则
     declare -A class_bandwidth_map
     declare -A class_ports_map
+    declare -A class_names_map
     
-    # 解析每个class的带宽
+    # 解析每个class的带宽和class ID
     while IFS= read -r class_line; do
         if [[ "$class_line" =~ class\ htb\ 1:([0-9]+).*rate\ ([^ ]*) ]]; then
             local class_id="${BASH_REMATCH[1]}"
             local bandwidth="${BASH_REMATCH[2]}"
             class_bandwidth_map["$class_id"]="$bandwidth"
             class_ports_map["$class_id"]=""
+            # 使用通用名称，因为show模式无法获取原始名称
+            class_names_map["$class_id"]="class-$class_id"
         fi
     done <<< "$classes"
     
@@ -805,15 +838,20 @@ generate_equivalent_command() {
         fi
     done <<< "$filters"
     
-    # 生成tc-rule参数
+    # 生成tc-rule参数 - 使用实际的端口和带宽信息
     local tc_rules=()
-    for class_id in "${!class_bandwidth_map[@]}"; do
+    # 按class ID顺序处理
+    local sorted_class_ids=($(printf '%s\n' "${!class_bandwidth_map[@]}" | sort -n))
+    
+    for class_id in "${sorted_class_ids[@]}"; do
         local bandwidth="${class_bandwidth_map[$class_id]}"
         local ports="${class_ports_map[$class_id]}"
+        local name="${class_names_map[$class_id]}"
         
         if [[ -n "$ports" ]]; then
-            tc_rules+=("--tc-rule \"$ports:$bandwidth\"")
-            echo "  Class 1:$class_id: 端口 $ports -> 带宽 $bandwidth"
+            # 由于show模式无法获取原始名称，使用通用格式
+            tc_rules+=("--tc-rule \"$name:$ports:$bandwidth\"")
+            echo "  Class 1:$class_id: 名称 $name, 端口 $ports -> 带宽 $bandwidth"
         fi
     done
 
@@ -846,22 +884,25 @@ generate_equivalent_command() {
     
     if [[ ${#tc_rules[@]} -gt 0 ]]; then
         echo "  端口限流详情:"
-        for class_id in "${!class_bandwidth_map[@]}"; do
+        # 按class ID顺序显示
+        for class_id in "${sorted_class_ids[@]}"; do
             local bandwidth="${class_bandwidth_map[$class_id]}"
             local ports="${class_ports_map[$class_id]}"
+            local name="${class_names_map[$class_id]}"
             if [[ -n "$ports" && -n "$bandwidth" ]]; then
                 local port_count=$(echo "$ports" | tr ',' '\n' | wc -l)
-                echo "    Class 1:$class_id: $port_count 个端口($ports) 限制 $bandwidth"
+                echo "    Class 1:$class_id: 名称 $name, $port_count 个端口($ports) 限制 $bandwidth"
             fi
         done
     fi
     
     echo ""
     echo "💡 提示:"
+    echo "  ⚠️  Show模式无法获取原始规则名称，显示为通用名称"
+    echo "  📋 可直接复制上述等效命令重新配置"
     if [[ "$DETECTED_INGRESS_IP" == "[无法自动检测]" || "$DETECTED_VIA_IP" == "[无法自动检测]" ]]; then
         echo "  ⚠️  部分IP参数无法自动检测，请手动补充"
     fi
-    echo "  📋 可直接复制上述等效命令重新配置"
 }
 
 # --- Show模式: 主函数 ---
