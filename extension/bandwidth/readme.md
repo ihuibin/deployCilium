@@ -73,16 +73,18 @@ EOF
 # via-ip 是 宿主机的 kubelet ip
 # via-mac 是本pod 在宿主机侧的 veth 网卡的 mac , 可选，在 spiderpool 场景下，会尝试自动检测
 # total-bandwidth 设置集群总的入口带宽 ， 单位是 Mbit 或者 Gbit
-# tc-rule 设置一个 istio gateway 的 Loadbalancer ip 入口 端口的限流规则，格式 "port[,port]...:bandwidth"
+# tc-default "10Mbit" 默认共享未声明端口策略 ，drop 丢弃，shared共享总带宽，不单独限制，10Mbit 限制在10M
+# tc-rule 设置一个 istio gateway 的 Loadbalancer ip 入口 端口的限流规则，格式 "secure-app:port1,port2,...:bandwidth"
 
  ./ingress.sh  \
- 	--ingress-ip "172.16.13.90"  \
- 	--ingress-interface "eth0" \
- 	--egress-interface "veth0" \
- 	--via-ip "172.16.13.11" \
- 	--total-bandwidth "300Mbit" \
- 	--tc-rule "80:10Mbit"  \
- 	--tc-rule "443,900:20Mbit"
+         --ingress-ip "172.16.13.90"  \
+         --ingress-interface "macvlan0" \
+         --egress-interface "veth-ns" \
+         --via-ip "172.16.13.11" \
+         --total-bandwidth "300Mbit"  \
+         --tc-default "10Mbit" \
+         --tc-rule "web-server:80:10Mbit"  \
+         --tc-rule "secure-app:443,900:20Mbit"
 
 # 查看生效规则
  ./ingress.sh show
